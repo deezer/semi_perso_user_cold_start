@@ -8,6 +8,7 @@ from model import RegressionTripleHidden
 from options import config
 from sklearn.metrics import ndcg_score, dcg_score
 import statistics
+from sklearn.preprocessing import Normalizer
 
 def evaluation(dataset_path, master_path, eval_type = "full_perso", embeddings_version="svd", model_filename=None, clustering_path=None, clusters_filename=None, nb_clusters=config["nb_clusters"]):
 
@@ -26,48 +27,89 @@ def evaluation(dataset_path, master_path, eval_type = "full_perso", embeddings_v
     listened_songs_test_ys = []
     goundtruth_list_test = []
     for idx in range(testing_set_size):
-        test_xs.append(pickle.load(open("{}/{}/test/x_{}.pkl".format(master_path, embeddings_version, idx), "rb")))
+        if eval_type in ["full_perso", "semi_perso", "popularity"] :
+            test_xs.append(pickle.load(open("{}/{}/test/x_{}.pkl".format(master_path, embeddings_version, idx), "rb")))
+        elif eval_type in ["inputfeatures"] :
+            vector = pickle.load(open("{}/{}/test/x_{}.pkl".format(master_path, embeddings_version, idx), "rb"))
+            transformer = Normalizer().fit(vector.reshape(1, -1))
+            norm_vector = torch.FloatTensor(transformer.transform(vector.reshape(1, -1))[0])
+            test_xs.append(norm_vector)
         listened_songs_test_ys.append(pickle.load(open("{}/{}/test/y_listened_songs_{}.pkl".format(master_path, embeddings_version, idx), "rb")))
         goundtruth_list_test.append(pickle.load(open("{}/{}/test/groundtruth_list_{}.pkl".format(master_path, embeddings_version, idx), "rb")))
+    if eval_type in ["avgd0stream"] : 
+        listd1d30streams = pd.read_parquet(dataset_path+"/user_features_test_"+embeddings_version+".parquet", engine ='fastparquet')
+        colavgd0stream = list(listd1d30streams)[2+target_dim*10:2+target_dim*10+target_dim]
+        avgd0stream = listd1d30streams[["user_index"]+colavgd0stream]
+        avgd0stream_df = avgd0stream.set_index("user_index", drop = True).sort_index()
+        test_xs = avgd0stream_df.values
     total_test_dataset = list(zip(test_xs, listened_songs_test_ys, goundtruth_list_test))
     del(test_xs, listened_songs_test_ys, goundtruth_list_test)
     print("--- nb of test samples : "+str(len(total_test_dataset))+" ---")
 
-    # Load song embeddings
+    if eval_type in ["full_perso", "semi_perso", "avgd0stream"] :
+        
+        # Load song embeddings
 
-    print("--- Load song embeddings ---")
-    song_embeddings_path = dataset_path + "/song_embeddings.parquet"
-    song_embeddings = pd.read_parquet(song_embeddings_path, engine = 'fastparquet').fillna(0)
-    list_features = ["feature_"+str(i) for i in range(len(song_embeddings["features_" + embeddings_version][0]))]
-    song_embeddings[list_features] = pd.DataFrame(song_embeddings["features_" + embeddings_version].tolist(), index= song_embeddings.index)
-    song_embeddings_values = song_embeddings[list_features].values
-    song_embeddings_values_ = torch.FloatTensor(song_embeddings_values.astype(np.float32))
-    print("--- nb of songs : "+str(len(song_embeddings_values_))+" ---")
+        print("--- Load song embeddings ---")
+        song_embeddings_path = dataset_path + "/song_embeddings.parquet"
+        song_embeddings = pd.read_parquet(song_embeddings_path, engine = 'fastparquet').fillna(0)
+        list_features = ["feature_"+str(i) for i in range(len(song_embeddings["features_" + embeddings_version][0]))]
+        song_embeddings[list_features] = pd.DataFrame(song_embeddings["features_" + embeddings_version].tolist(), index= song_embeddings.index)
+        song_embeddings_values = song_embeddings[list_features].values
+        song_embeddings_values_ = torch.FloatTensor(song_embeddings_values.astype(np.float32))
+        print("--- nb of songs : "+str(len(song_embeddings_values_))+" ---")
 
-    # Load model saved
+        if eval_type in ["full_perso", "semi_perso"] :
+            
+            # Load model saved
 
-    print("--- Load model ---")
-    regression_model = RegressionTripleHidden(input_dim = input_dim, output_dim = target_dim)
-    regression_model.load_state_dict(torch.load(model_filename))
-    reg = regression_model.eval()
-    if use_cuda:
-        reg = reg.to(device=cuda)
-    print(reg)
+            print("--- Load model ---")
+            regression_model = RegressionTripleHidden(input_dim = input_dim, output_dim = target_dim)
+            regression_model.load_state_dict(torch.load(model_filename))
+            reg = regression_model.eval()
+            if use_cuda:
+                reg = reg.to(device=cuda)
+            print(reg)
 
-    # if evaluation semi perso :
-    if eval_type == "semi_perso":
+        # if evaluation semi perso :
+        if eval_type in ["semi_perso"]:
 
-        print("--- Load centroids for semi perso evaluation ---")
+            print("--- Load centroids for semi perso evaluation ---")
+            #centroids to assign segment
+            with open(master_path + "/" + clustering_path + "/" + clusters_filename, "rb") as f:
+                kmeans = pickle.load(f)
+            centroids = kmeans.cluster_centers_
+            centroids_df = pd.DataFrame(centroids)
+            if use_cuda:
+                centroid_ = torch.FloatTensor(centroids_df.values).to(device=cuda)
+            else:
+                centroid_ = torch.FloatTensor(centroids_df.values)
+            print("--- nb of centroids : "+str(len(centroid_))+" ---")
+
+            #proba by segment for all song ids
+            print("--- Load proba by segment for all song ids ---")
+            song_proba_by_segment = []
+            for cluster_id in range(nb_clusters):
+                song_proba_by_segment.append(pickle.load(open("{}/{}/list_proba_{}.pkl".format(master_path, clustering_path + "_probas_" + embeddings_version, cluster_id), "rb")))
+            print("--- nb of proba by segment for all song ids : "+str(len(song_proba_by_segment))+" ---")
+
+    elif eval_type in ["popularity"] :
+        list_proba = generate_for_popularity_evaluation(dataset_path, embeddings_version="svd")
+        print("list of probabilities for each song for popularity baseline loaded")
+
+    elif eval_type in ["inputfeatures"]:
+
+        print("--- Load centroids for inputfeatures evaluation ---")
         #centroids to assign segment
         with open(master_path + "/" + clustering_path + "/" + clusters_filename, "rb") as f:
             kmeans = pickle.load(f)
         centroids = kmeans.cluster_centers_
         centroids_df = pd.DataFrame(centroids)
-        cuda = torch.device(0)
         if use_cuda:
             centroid_ = torch.FloatTensor(centroids_df.values).to(device=cuda)
         else:
             centroid_ = torch.FloatTensor(centroids_df.values)
+        cuda = torch.device(0)
         print("--- nb of centroids : "+str(len(centroid_))+" ---")
 
         #proba by segment for all song ids
@@ -76,7 +118,7 @@ def evaluation(dataset_path, master_path, eval_type = "full_perso", embeddings_v
         for cluster_id in range(nb_clusters):
             song_proba_by_segment.append(pickle.load(open("{}/{}/list_proba_{}.pkl".format(master_path, clustering_path + "_probas_" + embeddings_version, cluster_id), "rb")))
         print("--- nb of proba by segment for all song ids : "+str(len(song_proba_by_segment))+" ---")
-
+        
     # Compute evaluation metrics : avg precision, recall and ndcg
 
     testing_set_size = len(total_test_dataset)
@@ -97,25 +139,37 @@ def evaluation(dataset_path, master_path, eval_type = "full_perso", embeddings_v
         for i in range(num_batch_test):
             if i % indic_eval_evolution == 0 & i != 0 :
                 print("eval done for "+str(i)+" users")
-            if use_cuda:
-                batch_features_tensor_test = torch.stack(a[batch_size*i:batch_size*(i+1)]).cuda(device = cuda)
-            else:
-                batch_features_tensor_test = torch.stack(a[batch_size*i:batch_size*(i+1)])
-            predictions_test = reg(batch_features_tensor_test)
+            if eval_type in ["full_perso", "semi_perso"] :
+                if use_cuda:
+                    batch_features_tensor_test = torch.stack(a[batch_size*i:batch_size*(i+1)]).cuda(device = cuda)
+                else:
+                    batch_features_tensor_test = torch.stack(a[batch_size*i:batch_size*(i+1)])
+                    predictions_test = reg(batch_features_tensor_test)
+            elif eval_type in ["avgd0stream"]:
+                predictions_test = torch.FloatTensor(a[batch_size*i:batch_size*(i+1)])
+            elif eval_type in ["inputfeatures"]:
+                if use_cuda:
+                    predictions_test = torch.stack(a[batch_size*i:batch_size*(i+1)]).cuda(device = cuda)
+                else:
+                    predictions_test = torch.stack(a[batch_size*i:batch_size*(i+1)])
             # list of song indexes listened by user - index
             groundtruth_test_list_id = list(b[batch_size*i:batch_size*(i+1)])[0]
             groundtruth_test_list = list(c[batch_size*i:batch_size*(i+1)])
             k_val_max = max(k_val_list)
 
-            if eval_type == "full_perso" :
+            if eval_type in ["full_perso", "avgd0stream"] :
                 proba_values = torch.mm(predictions_test.cpu(), song_embeddings_values_.transpose(0, 1))
                 recommended_songs = (proba_values.topk(k= k_val_max, dim = 1)[1]).tolist()[0]
 
-            elif eval_type == "semi_perso" :
+            elif eval_type in ["semi_perso", "inputfeatures"] :
                 predicted_segment = segment_pred(predictions_test, centroid_, k = 1, cuda_name = cuda)[0]
                 proba_values = song_proba_by_segment[int(predicted_segment)-1]
                 recommended_songs = np.argsort(proba_values)[::-1]
-
+            
+            elif eval_type == "popularity" :
+                proba_values = list_proba
+                recommended_songs = np.argsort(proba_values)[::-1]
+                    
             else :
                 "error eval_type unknown"
 
@@ -128,9 +182,9 @@ def evaluation(dataset_path, master_path, eval_type = "full_perso", embeddings_v
                 recall = len(intersection)/denom_recall
                 current_recalls[k_val].append(recall)
             groundtruth_array = np.array(groundtruth_test_list, int)
-            if eval_type == "full_perso" :
+            if eval_type in ["full_perso", "avgd0stream"] :
                 scores = np.asarray([proba_values.numpy()[0].tolist()])
-            elif eval_type == "semi_perso" :
+            elif eval_type in ["semi_perso", "popularity", "inputfeatures"] :
                 scores = np.asarray([proba_values])
             else :
                 "error eval_type unknown"
@@ -210,3 +264,20 @@ def segment_pred(target_validation_estimated, centroid_, k = 10, cuda_name = tor
     else:
         results = (idx+ torch.ones(k, target_validation_norm_.size(0))).numpy()
     return results
+
+def generate_for_popularity_evaluation(dataset_path, embeddings_version="svd"):
+    
+    listd1d30streams = pd.read_parquet(dataset_path+"/user_features_train_"+embeddings_version+".parquet", engine = 'fastparquet')
+    exploded_data = listd1d30streams[["user_index", "d1d30_songs"]].explode('d1d30_songs').set_index('d1d30_songs')
+    grouped_data = exploded_data.groupby(['d1d30_songs']).size()
+    popularity_df = pd.DataFrame(grouped_data / float(sum(grouped_data)))
+    popularity_df.columns = ["proba"]
+    list_proba = []
+    for song_index in range(config["nb_songs"]):
+        if song_index in popularity_df.index :
+            list_proba.append(popularity_df.loc[song_index]["proba"])
+        else :
+            list_proba.append(0)
+    
+    return list_proba
+

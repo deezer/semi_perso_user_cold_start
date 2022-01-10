@@ -21,6 +21,10 @@ config = {
     'nb_clusters': 1000,
     'max_iter': 20,
     'random_state': 0,
+    #clustering for inputfeatures baseline
+    'nb_clusters_inputfeatures': 100,
+    'max_iter': 20,
+    'random_state': 0,
     # model evaluation
     'k_val_list': [50],
     'nb_iterations_eval_stddev': 2,
